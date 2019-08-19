@@ -1,0 +1,950 @@
+#!/user/bin/env python3
+# -*- coding: utf-8 -*-
+import sys
+import os
+import numpy as np
+import re
+import subprocess
+from threading import Thread
+from multiprocessing.pool import ThreadPool
+from functools import partial
+import argparse
+
+# In:	fichier de concaténation des gènes, fichier des clusters
+#		dossier des séquences de génomes (.fasta)
+#		fichier des clusters issus de l'exécution du cd-hit-est
+# Out: 	fichier avec ID/séquences des gènes représentatif de chaques clusters
+#
+# Exécution:
+# - Enregistrement de la taille chaques contigs de chaques génomes
+# - Enregistrement du header et de la séquence de chaque gènes
+# - Enregistrement des Clusters avec leurs gènes, la taille du contig et la taille de la séquence
+# - Calcul du medoide de chaque cluster avec plus de 2 gènes:
+#	- 
+
+
+
+# Valeurs par défaut
+core = 1
+
+
+# Parser function of contig sequence files. Takes into the fasta file of the genomes and returns the dictionary of contigs sizes.
+def ParseurFasta(infile):
+	
+	print("\nFasta files read\n")
+	
+	Fasta = {}
+	Fasta["order"] = []
+	sequence = 0
+	identifiant = ""
+	motif_couv = '^([0-9.]+)[^0-9.]'
+
+	for fichier in os.listdir(infile):
+		if (fichier[-6:] == '.fasta'):
+			nom_genome = fichier.split("/")[-1]
+			nom_genome = nom_genome[0:-6]
+			Fasta[nom_genome] = {}
+			
+			with open(infile+fichier, "r") as lines  :
+				for line in lines:
+					if (line[0] == '>'):
+						if (sequence == 0):
+							identifiant = line.split()[0].strip()
+					
+							if (nom_genome not in identifiant):
+								identifiant = ">"+nom_genome+"|"+identifiant[1:]
+							
+							Fasta[nom_genome][identifiant]={}
+							
+							if ("_multi=" in line):
+								couv_temp = line.split("_multi=")[1]
+								Fasta[nom_genome][identifiant]["recouvrement"] = float(re.search(motif_couv, couv_temp).groups()[0])
+							elif ("_cov_" in line):
+								couv_temp = line.split("_cov_")[1]
+								Fasta[nom_genome][identifiant]["recouvrement"] = float(re.search(motif_couv, couv_temp).groups()[0])
+							else:
+								Fasta[nom_genome][identifiant]["recouvrement"] = "NA"
+							
+						else:
+							Fasta[nom_genome][identifiant]["taille"]= sequence
+							sequence=0
+							identifiant = line.split()[0].strip()
+							
+							if (nom_genome not in identifiant):
+								identifiant = ">"+nom_genome+"|"+identifiant[1:]
+							
+							Fasta[nom_genome][identifiant]={}
+							
+							if ("_multi=" in line):
+								couv_temp = line.split("_multi=")[1]
+								Fasta[nom_genome][identifiant]["recouvrement"] = float(re.search(motif_couv, couv_temp).groups()[0])
+							elif ("_cov_" in line):
+								couv_temp = line.split("_cov_")[1]
+								Fasta[nom_genome][identifiant]["recouvrement"] = float(re.search(motif_couv, couv_temp).groups()[0])
+							else:
+								Fasta[nom_genome][identifiant]["recouvrement"] = "NA"
+								
+					else:
+						sequence=sequence+len(line.strip())
+				
+				Fasta[nom_genome][identifiant]["taille"]=sequence
+				sequence=0
+	
+	
+	return Fasta
+
+
+# Function parser of the gene file. Takes the gene's .fna file and returns the list of header, gene size and start of the sequences in the file.
+def ParseurFna(infile):
+	
+	print("Fna file read\n")
+	Fna = []
+	gene_id = {}
+	header = []
+	taille = []
+	debut = []
+	seq=''
+	num = 0
+	
+	lecture = open(infile, "r")
+	line=lecture.readline()
+	
+	while line != "":
+		if (line[0] == ">"):
+			gene_id[line.split(" ")[0].strip()] = num
+			num += 1 
+			header.append(line.strip())
+			debut.append(lecture.tell())
+			
+			if (seq != ''):
+				taille.append(len(seq))
+				seq = ''
+		else:		
+			seq += line.strip()
+		
+		line=lecture.readline()
+	
+	
+	taille.append(len(seq))
+	
+	lecture.close()
+	
+	Fna.append(gene_id)
+	Fna.append(header)
+	Fna.append(taille)
+	Fna.append(debut)
+			
+	return Fna
+
+
+# Parser function of the cluster file. Takes into the .clstr file the output of cd-hit-est and returns a dictionary of clusters with their genes and gene information from the .fna and .fasta files.
+def Cluster(infile_cluster, Fna, Fasta):
+	print("Cluster file read\n")
+	
+	Cluster = {}
+	
+	# Extraction of genes information from the .fna parser result 
+	gene_id_index = Fna[0]
+	header = Fna[1]
+	taille_index = Fna[2]
+	debut_index = Fna[3]
+
+	with open(infile_cluster, "r") as lines  :
+		for line in lines:
+			
+			if (line[0] == ">"):
+				cluster_id = line.replace(">Cluster ", "") 
+				cluster_id = cluster_id.strip()
+				
+				Cluster[cluster_id] = {}
+				
+			else:
+				
+				# Gene identification
+				gene_id_temp = line.split()[2].strip()
+				gene_id = gene_id_temp[:-3]
+				
+				
+				# Cluster referent gene identification
+				if (line.strip()[-1:] == "*"):
+					referent = True
+				else:
+					referent = False
+					
+				
+				
+				# Gene associated contig identification
+				contig_id = re.sub('_[0-9]+$', '', gene_id)
+				genome_id_temp = gene_id.split("|")[0]
+				genome_id = genome_id_temp[1:]
+				
+				# Recording gene informations
+				gene = gene_id_index[gene_id]
+				Cluster[cluster_id][gene] = {}
+				Cluster[cluster_id][gene]["header"] = header[gene]
+				Cluster[cluster_id][gene]["contig_taille"] = Fasta[genome_id][contig_id]["taille"]
+				Cluster[cluster_id][gene]["contig_recouvrement"] = Fasta[genome_id][contig_id]["recouvrement"]
+				Cluster[cluster_id][gene]["taille"] = taille_index[gene]
+				Cluster[cluster_id][gene]["debut"] = debut_index[gene]
+				Cluster[cluster_id][gene]["referent"] = referent
+				
+	return Cluster
+
+
+
+
+# Parallel execution function of the calculation of the representative of each cluster. Take into the clusters dictionaire, the .fna file, the threshold size,
+# the word-size for blastn analysis, the temporary files folder and the number of hearts.
+# Has an error recovery system via the temporary file.
+def Execution(Cluster, core, fna, taille_seuil, temp, word_size):
+				
+	print("Cluster representative gene calculating\n")
+	gene_id_select = []
+	pool = ThreadPool(processes=core)
+
+	# Existence test of temporary file. If yes -> resume by deleting the last line of temporary to avoid the risk of keeping an incomplete line
+	if os.path.exists(temp + "selection.txt"):
+		#bashCommand = "sed '$d' -i " + temp + "selection.txt"
+		#os.system(bashCommand)
+		bashCommand = "cut -f1 " + temp + "selection.txt"
+		temporaire = (subprocess.check_output(bashCommand, shell=True))
+		temporaire = temporaire.decode("utf8")
+		temporaire = temporaire.split("\n")[0:-1]
+		
+		print("Error recovery\t")
+		
+		# Reconstruction of the list of clusters by eliminating all those already calculated
+		nouv_liste = [i for i in Cluster if i not in temporaire] 
+		nb_cluster = len(nouv_liste)
+		pool.map(partial(Chimere, Cluster=Cluster, fna=fna, nb_cluster=nb_cluster, taille_seuil=taille_seuil, temp=temp, word_size=word_size), nouv_liste)
+		# ~ for gene_id in Cluster["order"]:
+			# ~ Chimere(gene_id, Cluster, fna, Fna, nb_cluster, taille_seuil, temp)
+		# ~ Chimere("2", Cluster, fna, Fna, nb_cluster, taille_seuil)
+		
+		print("")
+		pool.close()
+		pool.join()
+	
+
+	# If no error recovery system activation
+	else:
+
+		liste_clusters = list(Cluster.keys())
+		nb_cluster = float(len(liste_clusters))
+		bashCommand = "> " + temp + "selection.txt"
+		os.system(bashCommand)
+		 		
+		pool.map(partial(Chimere, Cluster=Cluster, fna=fna, nb_cluster=nb_cluster, taille_seuil=taille_seuil, temp=temp, word_size=word_size), liste_clusters)
+		# ~ for cluster_id in Cluster:
+			# ~ Chimere(cluster_id, Cluster, fna, nb_cluster, taille_seuil, temp, word_size)
+		# ~ Chimere("21993", Cluster, fna, nb_cluster, taille_seuil, temp, word_size)
+		# ~ Chimere("52407", Cluster, fna, nb_cluster, taille_seuil, temp, word_size)
+		# ~ Chimere("74544", Cluster, fna, nb_cluster, taille_seuil, temp, word_size)
+	
+		print("")
+		pool.close()
+		pool.join()
+	
+	
+
+
+
+
+
+# Detection function of clusters constructed with chimeric genes. If detection of chimeric clusters, fragmentation of the cluster into as many clusters as identified groups of genes		
+def Chimere(num_cluster, Cluster, fna, nb_cluster, taille_seuil, temp, word_size):
+	
+	#Eciture du cluster en cour
+	bashCommand="echo " + num_cluster + " >> " + temp + "cluster_actif"
+	os.system(bashCommand)
+	
+	# Progression bar print	
+	bashCommand = "wc -l " + temp + "selection.txt | cut -d\" \" -f1"
+	temps = (subprocess.check_output(bashCommand, shell=True))
+	temps = temps.decode("utf8").strip()
+	
+	pourcentage = (int(temps)/nb_cluster*100.000)
+
+	# ~ if (round(pourcentage, 3)%0.01 == 0):
+	print (str(pourcentage)+" %", end = '\r')
+
+	
+	# Retrieve information around the cluster
+	# genes list
+	# genes number
+	cluster = Cluster[num_cluster]
+	list_genes = list(cluster.keys())
+	len_list_gene = len(list_genes)
+
+	
+	# Dictionnary initialisation
+	chimere = {}
+	chimere["order"] = []
+	Identity = {}
+	Identity["order"] = []
+	start_stop = {}
+	
+	# Gene cluster referent identification
+	for gene in cluster:
+		if (cluster[gene]["referent"]):
+			representant_init = gene
+			break
+
+	# If cluster has 2 or less genes, don't search chimere
+	if (len_list_gene > 2):
+		
+		
+		# 1. Genes cluster sequences file generation	
+		lecture = open(fna, "r")
+		with open(temp+num_cluster+"_temp.fna", "w") as f:
+
+			for gene in cluster:
+				lecture.seek(cluster[gene]["debut"])
+				f.write(">{0}\n{1}\n".format(gene, lecture.read(cluster[gene]["taille"])))
+				
+				# Medoid dictionary initialisation
+				Identity["order"].append(gene)
+				Identity[gene] = {}
+				Identity[gene]["order"] = []
+
+				# Start-Stop dictionary initialisation
+				if (gene != representant_init):
+					start_stop[gene] = [-1,-1]
+		
+		lecture.close()
+				
+		for gene1 in Identity["order"]:
+			for gene2 in Identity["order"]:
+				if (gene1 != gene2):
+					Identity[gene1]["order"].append(gene2)
+					Identity[gene1][gene2] = float(0)	
+
+		# 2. Blastn request. Genes of the cluster against them.
+		
+		bashCommand = "blastn -query " + temp + num_cluster + "_temp.fna -subject " + temp + num_cluster + "_temp.fna -qcov_hsp_perc 90 -outfmt 6 -word_size " + word_size + " -dust no | sort -u -k1,2"
+		result = (subprocess.check_output(bashCommand, shell=True))
+		result = result.decode("utf8")
+		result = result.split("\n")[0:-1]
+		
+		bashCommand = "rm " + temp + num_cluster + "_temp.fna"
+		os.system(bashCommand)
+
+		# 3. Identity values extraction and for each alignment against the referent, start and stop alignment extraction.
+		
+		nb_identity = 0
+		for line in result:
+			line = line.split()
+			query = int(line[0].strip())
+			subject = int(line[1].strip())
+			
+			# Récupération des informations Identity pour le calcul medoide
+			if (query != subject):
+				identity = line[2]
+				Identity[query][subject] = float(identity)
+				
+				# Récupération des information start-stop pour prédiction chimère (test des start stop pour les cas particuliers)
+				if (subject == representant_init):
+					a = int(line[8])
+					b = int(line[9])
+					nb_identity +=1
+					if(a<b):
+						start_stop[query][0] = a
+						start_stop[query][1] = b
+					else:
+						start_stop[query][0] = b
+						start_stop[query][1] = a
+		
+		# 4. For each genes, test recovery again others (if A.start < B.stop and A.stop > B.start)
+		# if gene match with groups, add it and update group start-stop.		
+		# else, creation of new group
+		
+		liste_cles_start_stop = list(start_stop.keys())
+		compt = 0
+		 
+		if (nb_identity >= 1):
+
+			# Creation of the first group
+			NO = True
+			while NO:
+				gene0 = liste_cles_start_stop[compt]
+				if (start_stop[gene0][0] != -1):
+					NO = False
+				else:
+					compt+=1
+			
+			chimere["order"].append(0)
+			chimere[0]={}
+			chimere[0]["start-stop"] = [start_stop[gene0][0],start_stop[gene0][1]]
+			chimere[0]["genes"] = [gene0]
+			groupe = 1
+			
+			for gene in liste_cles_start_stop:
+				ajout = False
+				start_gene = int(start_stop[gene][0])
+				stop_gene = int(start_stop[gene][1])	
+				
+				if (start_gene!=-1 and stop_gene!=-1):
+					for g in chimere["order"]:
+						start_groupe = int(chimere[g]["start-stop"][0])
+						stop_groupe = int(chimere[g]["start-stop"][1])
+						
+						# If recovery between gene and group
+						if ((start_gene) <= (stop_groupe) and (stop_gene) >= (start_groupe)):
+							ajout=True
+							
+							if (gene not in chimere[g]["genes"]):
+								chimere[g]["genes"].append(gene)
+							
+							# Group start-stop update
+							if (start_gene<start_groupe):
+								chimere[g]["start-stop"][0] = start_gene
+							if (stop_gene>stop_groupe):
+								chimere[g]["start-stop"][1] = stop_gene
+					
+					# New group creation			
+					if not(ajout):
+						chimere["order"].append(groupe)
+						chimere[groupe]={}
+						chimere[groupe]["start-stop"] = [start_gene,stop_gene]
+						chimere[groupe]["genes"] = [gene]
+						groupe+=1
+			
+
+			# Elimination of dictionary redundancy
+			modif = True 
+			while modif:
+				modif = False
+				for groupe1 in chimere["order"]:
+					for groupe2 in chimere["order"]:
+						if (groupe1 != groupe2):
+							start1 = int(chimere[groupe1]["start-stop"][0])
+							stop1 = int(chimere[groupe1]["start-stop"][1])
+							start2 = int(chimere[groupe2]["start-stop"][0])
+							stop2 = int(chimere[groupe2]["start-stop"][1])
+							
+							# Concatenation des 2 groupes
+							if ((start1) <= (stop2) and (stop1) >= (start2)):
+								for gene in chimere[groupe2]["genes"]:
+									if gene not in chimere[groupe1]["genes"]:
+										chimere[groupe1]["genes"].append(gene)
+								if (start1>=start2):
+									chimere[groupe1]["start-stop"][0] = start2
+								if (stop1<=stop2):
+									chimere[groupe1]["start-stop"][1] = stop2
+									
+								chimere[groupe2] = ""
+								del(chimere["order"][chimere["order"].index(groupe2)])
+								modif = True
+								break
+								
+			# 3.ter. Check the number of groups on the output and stop the execution if necessary (<= 1 group)
+			# Do classic research via medoide
+			if (len(chimere["order"]) <= 1):
+				Medoide(list_genes, num_cluster, cluster, Identity, False, temp)
+				return
+			
+			# 4.bis Curration of the groups according to the size of the genes composing them
+			# Test the maximum size of the genes in each group. If maximum size <threshold size, group removal 
+			# Extraction of the maximum size
+			
+			groupe = len(chimere["order"]) -1
+			while groupe >= 0:
+				taille_max = 0
+				for gene in chimere[chimere["order"][groupe]]["genes"]:
+					if (cluster[gene]["taille"] > taille_max):
+						taille_max = cluster[gene]["taille"]
+						
+				if (taille_max < taille_seuil):
+					
+					del(chimere["order"][groupe])
+					
+				groupe -= 1
+				
+			
+			# 5. Construction of new clusters if necessary. If only one group remains at the end -> Keep the cluster
+			# If more than one group -> test for each group if there is at least one gene larger than the limit, otherwise delete the group
+			# Different behavior if complete or partial gene:
+			# partial gene -> favors the largest to avoid over fragmentation so we do not change anything
+			# complete gene -> fragmentation into X distinct groups because chimeric gene
+			# Call of the calculation functions of the medoid, size contig, size gene, recovery
+			if (len(chimere["order"]) > 1):
+				for groupe in chimere["order"]:	
+					nouv_cluster = num_cluster + "_" + str(groupe)
+					len_groupe = len(chimere[groupe]["genes"])
+					# If the group is composed of more than 2 genes: Complete calculation of the representative
+					# Calling the Build function to arrange the output character string
+					if (len_groupe > 2):
+						Medoide(chimere[groupe]["genes"], nouv_cluster, cluster, Identity, True, temp)
+					
+					# Si le groupe est composé de 2 gènes: Calcul Complet du représentant moins calcul medoide
+					# Appel de la fonction Construction pour agencer la chaine de caractères sortie
+					elif (len_groupe > 1):
+						liste_genes_contig = Contig(chimere[groupe]["genes"], cluster) 
+						liste_genes_taille = Taille(liste_genes_contig, cluster)
+						liste_genes_recouvrement = Recouvrement(liste_genes_taille, cluster)
+						Construction(liste_genes_recouvrement, nouv_cluster, len_groupe, "NA", cluster, temp)
+					
+					# If the group is composed of 1 gene: Gene transfer
+					# Calling the Build function to arrange the output character string
+					else:
+						Construction(chimere[groupe]["genes"][0], nouv_cluster, "1", "NA", cluster, temp)
+
+			# After research, no detection of chimeric genes -> Normal analysis -> call function medoid
+			# Calling the Build function to arrange the output character string
+			else:
+				Medoide(list_genes, num_cluster, cluster, Identity, False, temp)
+		
+		else:
+			Medoide(list_genes, num_cluster, cluster, Identity, False, temp)
+	
+	# Cluster with 2 genes: Selection of representative according to size, contig and recovery
+	# Calling the Build function to arrange the output character string
+	elif (len_list_gene > 1):
+		liste_genes_contig = Contig(list_genes, cluster) 
+		liste_genes_taille = Taille(liste_genes_contig, cluster)
+		liste_genes_recouvrement = Recouvrement(liste_genes_taille, cluster)
+		Construction(liste_genes_recouvrement, num_cluster, len_list_gene,  "NA", cluster, temp)
+	# Cluster with 1 gene: returns the gene
+	# Calling the Build function to arrange the output character string
+	else:	
+		Construction(list_genes[0], num_cluster, len_list_gene, "NA", cluster, temp)
+	
+	return
+
+
+
+
+
+# Function calculating the medoide of each clusters. Takes into the cluster dictionary and the cluster identifier
+# Call of the calculation function of the max size of contig
+# Calling the calculation function of the median size
+# Call the max recovery calculation function
+# Returns the list of genes selected for this cluster.
+def Medoide(list_genes, num_cluster, cluster, Identity, novo, temp):
+
+	# Initialization of the value of average_id for cases where it is not calculated
+	id_medianne = "NA"
+	len_list_gene = len(list_genes)
+	list_id = []
+	
+	# Initialization of the dictionary for recording lison numbers with ID> = Average_id
+	Nb_liaison = {}
+	Nb_liaison["order"] = []
+	
+	# Calculating the median Id:
+	# Extracting the list of IDs associated with the list of genes and sorting IDs
+	# Calculation of the number of links according to the threshold imposed by Id Medianne
+	# If you are in a de novo cluster, test for each gene of its presence in the list
+	# De novo cluster
+	if (novo):
+		# Median calculation
+		for gene1 in list_genes:
+			
+			Nb_liaison["order"].append(gene1)
+			Nb_liaison[gene1] = 0
+			
+			for gene2 in list_genes:
+				if (gene1 != gene2 and Identity[gene1][gene2] != 0): 
+					list_id.append(Identity[gene1][gene2])
+		
+		list_id.sort()
+		
+		# Special case: If the list is size 0 or 1
+		if (len(list_id) == 0):
+			id_medianne = 0
+		elif (len(list_id) == 1):
+			id_medianne = list_id[0]
+		else:
+			id_medianne = list_id[(len(list_id)//2)]
+		
+		# Calculation of the number of links according to the threshold imposed by Id Medianne
+		for gene1 in list_genes : 
+			for gene2 in list_genes:
+				if (gene1 != gene2):
+					if (Identity[gene1][gene2] >= id_medianne):
+						Nb_liaison[gene1] += 1
+						Nb_liaison[gene2] += 1
+	
+	# Cluster of origin
+	else:	
+		# Median calculation		
+		for gene1 in Identity["order"] : 
+			
+			Nb_liaison["order"].append(gene1)
+			Nb_liaison[gene1] = 0
+			
+			for gene2 in Identity[gene1]["order"]:
+				if (gene1 != gene2 and Identity[gene1][gene2] != 0):  
+					list_id.append(Identity[gene1][gene2])
+
+		list_id.sort()
+		
+		# Special case: If the list is size 0 or 1
+		if (len(list_id) == 0):
+			id_medianne = 0
+		elif (len(list_id) == 1):
+			id_medianne = list_id[0]
+		else:
+			id_medianne = list_id[(len(list_id)//2)]
+		
+		# Calculation of the number of links according to the threshold imposed by Id Medianne
+		for gene1 in Identity["order"] : 
+			for gene2 in Identity[gene1]["order"]:
+				if (Identity[gene1][gene2] >= id_medianne):
+					Nb_liaison[gene1] += 1
+					Nb_liaison[gene2] += 1
+
+
+	# Registering link numbers in a parallel list to facilitate the process
+	list_liaison = []
+	for gene in Nb_liaison["order"]:
+		list_liaison.append(Nb_liaison [gene])
+		
+	# Identification of the max number of links and extraction of the indices of the genes having this number max
+	m = max(list_liaison)
+	indice_max = [i for i, j in enumerate(list_liaison) if j == m]
+	
+	
+	# Association of indexes extracted with the identifier of the gene
+	liste_genes_medoid = []
+	for i in indice_max:
+		liste_genes_medoid.append(Nb_liaison ["order"][i])
+		
+	# Selection of the representative according to the size of the contig, the gene and the recovery
+	# If several genes are medoids.
+	if (len(liste_genes_medoid) > 1):
+		liste_genes_contig = Contig(liste_genes_medoid, cluster)
+		liste_genes_taille = Taille(liste_genes_contig, cluster)
+		representant_cluster = Recouvrement(liste_genes_taille, cluster)
+		
+	# If a single gene is mediocidal
+	else:
+		representant_cluster = liste_genes_medoid[0]
+	
+	Construction(representant_cluster, num_cluster, len_list_gene, id_medianne, cluster, temp)
+
+
+# Representative selection function according to contig size
+def Contig(liste, cluster):
+	list_genes_select = []
+	contig = []
+	max_contig = 0
+
+	for i in liste:
+		taille_contig = cluster[i]["contig_taille"]
+		
+		# Reset the list and modify the max contig
+		if (taille_contig > max_contig):
+			list_genes_select = []
+			list_genes_select.append(i)
+			max_contig = taille_contig
+		
+		# Adding the gene to the already existing list
+		elif (taille_contig == max_contig):
+			list_genes_select.append(i)
+
+	return list_genes_select
+
+
+# Representative selection function according to the size of the gene
+def Taille(liste, cluster):
+	list_genes_select = []
+	taille = []
+	nb_genes = len(liste)
+	
+	for i in liste:
+		taille.append(cluster[int(i)]["taille"])
+	taille.sort()
+	
+	# Calculation of the median value
+	if (nb_genes % 2 == 0):
+		med = taille[(nb_genes//2)]
+		
+	else:
+		med = np.median(taille)
+	
+	# Registration of genes whose gene size is> = medianne
+	for i in liste:
+		if (cluster[i]["taille"] >= med):	
+			list_genes_select.append(i)	
+		
+	return list_genes_select
+
+
+# Selection function of the cluster representative in function of the contig overlap value.
+# Differentiation between the two sequencing methods (Megahit (detection by "_multi = *** _") and Other (detection by "_cov _ ** _"))
+def Recouvrement(liste, cluster):
+	couverture = {}
+	couv_list = []
+	recouvrement_max = 0
+	
+	for gene_id in liste:
+		recouvrement = cluster[gene_id]["contig_recouvrement"]
+		
+		if (recouvrement == "NA"):
+			return gene_id
+		elif (recouvrement >= recouvrement_max):
+			sortie = gene_id
+			recouvrement_max = recouvrement
+	
+	return sortie
+
+	
+# Building the Medoide exit line:
+def Construction(gene, num_cluster, len_list_gene, id_medianne, cluster, temp):
+	# Rewriting the representative's gene_id
+	temp_general = cluster[gene]["header"]
+	gene_id	= (temp_general.split(" ")[0].strip())
+	
+	contig = cluster[gene]["contig_taille"]
+	taille = cluster[gene]["taille"]
+	referent = cluster[gene]["referent"]
+	recouvrement = cluster[gene]["contig_recouvrement"]
+	
+	temp_rbs = temp_general.split(";")
+	RBS = str(temp_rbs[3].split("=")[1])
+	spacer = str(temp_rbs[4].split("=")[1])
+	gc = str(temp_rbs[5].split("=")[1])
+	
+	# Display: Cluster ID, Identifier of the gene representing, number of genes in the cluster, nature of the RBS sequence, space between the RBS sequence and the gene, gc rate, average of the IDs for the mediid calculation
+	resultat_final = str(num_cluster) + "\t" + str(gene) + "\t" + str(gene_id) + "\t" + str(referent) + "\t" + str(contig) + "\t" + str(taille) + "\t" + str(recouvrement) + "\t" + str(RBS) + "\t" + str(spacer) + "\t" + str(gc) + "\t" +  str(len_list_gene) + "\t" +  str(id_medianne)
+	
+	bashCommand = "flock -e " + temp + "selection.txt -c \" echo \'" + resultat_final + "\'\" >> " + temp + "selection.txt"
+	os.system(bashCommand)
+
+
+# Write the new concatenated gene file from the CD-HIT imput file.
+# Function taking in the list of gene identifiers and the concatenated gene file. Writes the new representative gene file
+# Read the .stat file to extract the indexes of the genes
+def Ecriture(fna, outfile, temp):
+	
+	print("Génération du fichier bilan de sélection des représentants\n")
+	
+	# Concatenation of temporary files
+	bashCommand = "cat " + temp + "*.txt >> " + temp + "concatenation.stat"	
+	os.system(bashCommand)
+	
+	# Elimination of duplicates from the list. Reading the document, registering the headers
+	bashCommand = "sort -u "+temp+"concatenation.stat > " + outfile +".stat"
+	os.system(bashCommand)
+	
+	# Adding the .stat file header
+	bashCommand = "sed -i \'1iId_cluster\tId_gene\tHeader_gene\tOriginal_selected\tLength_contig\tLength_gene\tRecovery\tRBS\tSpacer\tGC\tLength_cluster\tIdentity_mediane\' " + outfile +".stat" 
+	os.system(bashCommand)
+	
+	print("Génération du nouveau fichier.fna de concaténation des gènes représentant...\n")
+	
+	Genes = {}
+	
+	# Extraction of gene indexes from .stat
+	bashCommand = "cat " + outfile + ".stat | cut -f3"
+	gene = (subprocess.check_output(bashCommand, shell=True))
+	gene = gene.decode("utf8")
+	gene = gene.split("\n")
+	
+	# Creating a header dictionary for easy comparison
+	for g in gene[1:-1]:
+		Genes[g] = True
+	gene = ""
+	
+
+	
+	# Read the.fna file to retrieve the genes 
+	lecture = open(fna, "r")
+	line = lecture.readline()
+
+	with open(outfile, "w") as f:
+		while line != "":
+			if (line[0] == ">"):
+				actif = False
+				gene_id = line.split(" ")[0].strip()
+				if (gene_id in Genes):
+					actif = True
+					f.write("{0}".format(line))
+			elif (actif):
+				f.write("{0}".format(line))
+			line = lecture.readline()
+		lecture.close()
+
+	
+def Correction(outfile, core, word_size, temp):
+	
+	print("Correction des représentants par suppression de la redondance\n")
+	
+	# Test the existance of the .cor.stat file. If yes -> pass the Blastn
+	Genes = {}
+	
+	# Records of general information about each gene
+	lecture = open(outfile+".stat", "r")
+	line = lecture.readline()
+	line = lecture.readline()
+	
+	while line != "":
+		infos = line.split()
+		gene = infos[2].strip()
+		Genes[gene] = infos
+		line = lecture.readline()
+	lecture.close()
+
+	print("Génération de la databases")
+	
+	
+	if not os.path.exists(temp+"BLASTN.txt"):	
+		if not os.path.exists(temp+"data_base"):
+			os.makedirs(temp+"data_base")
+
+		bashCommand = "makeblastdb -in " + outfile + " -dbtype nucl -hash_index -out "+ temp +"data_base/db -logfile "+temp+"data_base/db.log"
+		os.system(bashCommand)
+		
+		
+		print("Blastn du fichier final contre lui même pour éliminer la redondance\n")
+		# fragmentation of the file into as many hearts
+		bashCommand = "seqkit split " + outfile + " -p " + str(core) + " -f -O " + temp + "query_fragment -j " + str(core)
+		os.system(bashCommand)
+		
+		
+		bashCommand = "parallel -j " + str(core) + " --eta \' blastn -query {} -db "+temp+"data_base/db -perc_identity 95 -qcov_hsp_perc 90 -outfmt 6 -word_size " + word_size + " -dust no | sort -u -k1,2 > " + temp + "result_blastn_{/} \' ::: " + temp + "query_fragment/*"
+		os.system(bashCommand)
+		
+		# Concatenation of temporary query files with the sample file
+		bashCommand = "cat "+temp+"result_blastn_* > "+temp+"BLASTN.txt"
+		os.system(bashCommand)
+
+		# Deleting the temporary data-base
+		bashCommand = "rm -r "+temp+"data_base"
+		os.system(bashCommand)
+	
+	
+	print("Parseur du résultat de Blastn\n")
+	bashCommand = "> " + temp + "matching_redondant.txt"
+	os.system(bashCommand)
+		
+	bashCommand="while read line; do col1=$(echo $line | cut -d\" \" -f1); col2=$(echo $line | cut -d\" \" -f2); if [ $col1 != $col2 ]; then echo $col1 $col2 >> " + temp + "matching_redondant.txt; fi; done < " + temp + "BLASTN.txt"
+	os.system(bashCommand)
+	
+	lecture = open(temp + "matching_redondant.txt", "r")
+	line = lecture.readline()
+	
+	while line != "":
+		query = ">"+(line.split(" ")[0]).strip()
+		subject = ">"+(line.split(" ")[1]).strip()
+		
+		#Verify that gene1 or gene2 are still potentially redundant
+		if (query in Genes and subject in Genes):
+			
+			gene1 = Genes[query]
+			gene2 = Genes[subject]
+			
+			# Selection on the contig
+			if (gene1[4] != gene2[4]):
+				if (gene1[4] >= gene2[4]):
+					del(Genes[subject])
+				else:
+					del(Genes[query])
+
+			# Selection on the size of the gene
+			elif (gene1[5] != gene2[5]):
+				if (gene1[5] >= gene2[5]):
+					del(Genes[subject])
+				else:
+					del(Genes[query])
+					
+			# Selection on the recovery
+			elif (gene1[6] != gene2[6]):
+				if (gene1[6] >= gene2[6]):
+					del(Genes[subject])
+				else:
+					del(Genes[query])
+			
+			# Selection of the first from the list	
+			else:
+				del(Genes[subject])
+		line = lecture.readline()
+	
+	lecture.close()
+	
+	print("Réecriture du fichier de sortie\n")
+	
+	# Rewriting the stat file
+	with open(outfile+".cor.stat", "w") as f :
+		f.write("{0}\t{1}\t{2}\t{3}\t{4}\t{5}\t{6}\t{7}\t{8}\t{9}\t{10}\t{11}\n".format("Id_cluster", "Id_gene", "Header_gene", "Original_selected", "Length_contig", "Length_gene", "Recovery", "RBS", "Spacer", "GC", "Length_cluster", "Identity_mediane"))
+		for gene_id in Genes:
+			gene = "\t".join(Genes[gene_id])
+			f.write("{0}\n".format(gene))
+	
+	
+	# Read the.fna file to retrieve the genes
+	lecture = open(outfile, "r")
+	line = lecture.readline()
+
+	
+	actif = False
+	with open(outfile+".cor", "w") as f:
+		while line != "":
+			if (line[0] == ">"):
+				actif = False
+				gene_id = line.split(" ")[0].strip()
+				if (gene_id in Genes):
+					actif = True
+					f.write("{0}".format(line))
+			elif (actif):
+				f.write("{0}".format(line))
+			
+			line = lecture.readline()
+				
+	lecture.close()
+	
+	# Elimination of temporary files
+	bashCommand = "rm -r " + temp
+	os.system(bashCommand)
+	
+# help
+parser=argparse.ArgumentParser(
+    description='''cdhit-est-medoide correct the cd-hit-est output and optimize the cluster referant selection''',
+    epilog="""The algorithm have an error recovery system""")
+parser.add_argument('-fas', type=str, help='address of the folder containing .fasta files')
+parser.add_argument('-fna', type=str, help='address of the genes file')
+parser.add_argument('-c', type=str, help='address of the cd-hit-est cluster file')
+parser.add_argument('-s', type=int, default=1000, help='minimum gene size to select a group from a chimeric cluster. default=1000')
+parser.add_argument('-ws', type=str, default=11, help='word size for blastn analyses. default=11')
+parser.add_argument('-tmp', type=str, help='temporary folder address.')
+parser.add_argument('-o', type=str, help='output.')
+parser.add_argument('-t', type=int, default=11, help='number of threads used. default 1')
+args=parser.parse_args()		
+
+try : 
+	fasta = sys.argv[sys.argv.index("-fas")+1]
+	fna = sys.argv[sys.argv.index("-fna")+1]
+	cluster = sys.argv[sys.argv.index("-c")+1]
+	taille_seuil = int(sys.argv[sys.argv.index("-s")+1])
+	outfile = sys.argv[sys.argv.index("-o")+1]
+	word_size = sys.argv[sys.argv.index("-ws")+1]
+	temp = sys.argv[sys.argv.index("-tmp")+1]
+	core = int(sys.argv[sys.argv.index("-t")+1])
+
+	
+except :
+	sys.exit
+
+
+# Correction fasta
+if (fasta[-1] != "/"):
+	fata = fasta + "/"
+	
+# Correction temp
+if (temp[-1] != "/"):
+	temp = temp + "/"
+
+if not os.path.exists(temp):
+	os.makedirs(temp)
+
+if not os.path.exists(outfile+".stat"):
+	Fasta=ParseurFasta(fasta)
+	Fna=ParseurFna(fna)
+	Clust = Cluster(cluster, Fna, Fasta)
+	Execution(Clust, core, fna, taille_seuil, temp, word_size)
+	
+if not os.path.exists(outfile+".cor.stat"):
+	Ecriture(fna, outfile, temp)
+
+Correction(outfile, core, word_size, temp)
