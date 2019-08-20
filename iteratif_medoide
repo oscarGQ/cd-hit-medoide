@@ -1,0 +1,247 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import sys
+import os
+import subprocess
+
+
+# Script permmetant d'éliminer la redondance causé par la concaténation
+# Script qui réalise un blastn des gènes de la liste1 contre les gènes de la liste 2
+
+# Script enregistrant les informations des fichiers .stat
+def Parseur_stat(stat1, stat2):
+
+        print("Parseur fichier: " + stat1)
+
+        Statist = {}
+
+        # Lecture du fichier stat1
+        lecture = open(stat1, "r")
+        line = lecture.readline()
+        line = lecture.readline()
+
+        while line != "":
+                info = line.split()
+                gene = info[2]
+                if(line[2] not in Statist):
+                        Statist[gene] = {}
+                        Statist[gene]["cluster"] = int(info[10])
+                        Statist[gene]["taille"] = int(info[5])
+                        Statist[gene]["origine"] = "1"
+                        Statist[gene]["conservation"] = True
+
+                line = lecture.readline()
+        lecture.close()
+
+        print("Parseur fichier: " + stat2)
+
+        # Lecture du fichier stat2
+        lecture = open(stat2, "r")
+        line = lecture.readline()
+        line = lecture.readline()
+
+        while line != "":
+                info = line.split()
+                gene = info[2]
+                if(gene not in Statist):
+                        Statist[gene] = {}
+                        Statist[gene]["cluster"] = int(info[10])
+                        Statist[gene]["taille"] = int(info[5])
+                        Statist[gene]["origine"] = "2"
+                        Statist[gene]["conservation"] = True
+
+                line = lecture.readline()
+        lecture.close()
+
+
+        return Statist
+
+
+# Script de concatenation des catalogues, génération de la data base,blastn et récupération des headers matchants
+def Blastn(infile1, infile2, Statist, temp, core, word_size):
+
+        print("Concatenation catalogue 1 et 2")
+
+        if not os.path.exists(temp + "resultats_blastn_projet1_vs_projet2"):
+                # Concatenation des .fna (2 puis 1 afin de favoriser la conservation des gènes 1)
+                bashCommand = "cat " + infile2 + " " + infile1 + " > " + temp + "concatenation_catalogues.fna"
+                os.system(bashCommand)
+
+                print("Construction base de données")
+
+                # Construction d'une data-base de la concatenation des catalogues
+                bashCommand = "makeblastdb -in " + temp + "concatenation_catalogues.fna -dbtype nucl -hash_index -out " + temp + "db -logfile " + temp +"db.log"
+                os.system(bashCommand)
+
+                print("Blastn")
+
+                # Fragmentation de la base de donnée
+                bashCommand = "seqkit split " + temp + "concatenation_catalogues.fna -p " + core + " -f -O " + temp + "query_fragment -j " + core
+                os.system(bashCommand)
+
+                # Blastn en parallèle
+                bashCommand = "parallel -j " + core + " --eta \' blastn -query {} -db " + temp + "db -perc_identity 95 -qcov_hsp_perc 90 -outfmt 6 -dust no -word_size " + word_size + " | sort -u -k1,2 > " + temp + "{/.}_result_blastn.txt \' ::: " + temp + "query_fragment/*"
+                os.system(bashCommand)
+
+                # Concatenation des résultats de blastn
+                bashCommand = "cat " + temp + "*_result_blastn.txt > " + temp + "resultats_blastn_projet1_vs_projet2"
+                os.system(bashCommand)
+
+        print("Analyse résultats")
+
+        # Récupération des headers du resultat
+        dico_header= {}
+        lecture = open(temp + "resultats_blastn_projet1_vs_projet2", "r")
+        line=lecture.readline()
+
+        # Analyse des résultats
+        while line != "":
+                cata1 = False
+
+                # Identification du gène issus du catalogue1
+                if (Statist[">" + line.split()[0].strip()]["origine"] == "1"):
+                        header1 = ">" + line.split()[0].strip()
+                        header2 = ">" + line.split()[1].strip()
+                else:
+                        header1 = ">" + line.split()[1].strip()
+                        header2 = ">" + line.split()[0].strip()
+
+                # Vérification que les 2 gènes sont potentiellemnt non redondant
+                # ~ print("")
+                # ~ print(Statist[header1]["conservation"])
+                # ~ print(Statist[header2]["conservation"])
+                if (header1 != header2):
+                        if (Statist[header1]["conservation"] and Statist[header2]["conservation"]):
+
+                                # Vérification de la taille de header2
+                                if (Statist[header2]["taille"] >= seuil):
+
+                                        # Vérification du rapport taille cluster1, cluster2
+                                        if (Statist[header1]["cluster"] == 1 and Statist[header2]["cluster"] >= 3):
+
+                                                # Elimination gene du catalogue 1
+                                                if (header1 not in dico_header):
+                                                        dico_header[header1] = True
+                                                        cata1 = True
+                                                        Statist[header1]["conservation"] = False
+                                                        # ~ print(header1)
+                                                        # ~ print(header1 + "\t" + str(Statist[header1]["taille"]) + "\t" + str(Statist[header1]["cluster"]))
+                                                        # ~ print(header2 + "\t" + str(Statist[header2]["taille"]) + "\t" + str(Statist[header2]["cluster"]))
+                                                        # ~ print("")
+
+                                # Elimination du gène du catalogue2
+                                if not(cata1):
+                                        if (header2 not in dico_header):
+                                                dico_header[header2] = True
+                                                Statist[header2]["conservation"] = False
+                                                # ~ print(header1)
+
+                line=lecture.readline()
+        lecture.close()
+        print(len(list(Statist.keys())))
+        print(len(list(dico_header.keys())))
+        comptage=0
+        for i in Statist:
+                if not(Statist[i]["conservation"]):
+                        comptage+=1
+        print(comptage)
+        return dico_header
+
+
+# SCript de réécriture du fichier .fna en éliminant les gènes présents dans le dico
+def Elimination(dico_header, temp, outfile):
+
+        print("Ecriture fichier .fna")
+
+        # Lecture du catalogue et enregistrement sur le vif des gènes conservés
+        lecture = open(temp +"concatenation_catalogues.fna", "r")
+        line=lecture.readline()
+        debut = True
+
+
+        with open(outfile, "w") as f:
+                while line != "":
+                        if (line[0] == ">"):
+                                actif = False
+                                header_partial = line.split(" ")[0].strip()
+                                # ~ print(header_partial)
+                                if (header_partial not in dico_header):
+                                        actif = True
+                                        f.write("{0}".format(line))
+                        elif(actif):
+                                f.write("{0}".format(line))
+
+                        line=lecture.readline()
+                lecture.close()
+
+# Sript d'écriture du nouveau fichier.stat correspondant à la concatenation des 2 .stat
+def Nouv_stat(stat1, stat2, outfile, dico_header):
+
+        print("Ecriture fichier .stat")
+
+        # Lecture du fichier stat1 et enregistrement sur le vif des lignes conservée
+        lecture = open(stat1, "r")
+        line=lecture.readline()
+
+        with open(outfile+".stat", "w") as f:
+                while line != "":
+                        header_partial = line.split()[2].strip()
+                        if (header_partial not in dico_header):
+                                f.write("{0}".format(line))
+                        line=lecture.readline()
+                lecture.close()
+
+        # Lecture du fichier stat1 et enregistrement sur le vif des lignes conservée
+        lecture = open(stat2, "r")
+        line=lecture.readline()
+        line=lecture.readline()
+
+        with open(outfile+".stat", "a") as f:
+                while line != "":
+                        header_partial = line.split()[2].strip()
+                        if (header_partial not in dico_header):
+                                f.write("{0}".format(line))
+                        line=lecture.readline()
+                lecture.close()
+
+# help
+parser=argparse.ArgumentParser(
+    description='''cdhit-est-medoide correct the cd-hit-est output and optimize the cluster referant selection''',
+    epilog="""The algorithm have an error recovery system""")
+parser.add_argument('-in1', type=str, help='Path to the gene file 1')
+parser.add_argument('-in2', type=str, help='Path to the gene file 2')
+parser.add_argument('-stat1', type=str, help='Path to the .stat 1 gene file')
+parser.add_argument('-stat2', type=str, help='Path to the .stat 2 gene file')
+parser.add_argument('-tmp', type=str, help='temporary folder address.')
+parser.add_argument('-tseuil', type=int, default=1000, help='minimum gene size to select a group from a chimeric cluster. default=1000')
+parser.add_argument('-ws', type=str, default=11, help='word size for blastn analyses. default=11')
+parser.add_argument('-out', type=str, help='output.')
+parser.add_argument('-thread', type=int, default=1, help='number of threads used. default 1')
+args=parser.parse_args()
+
+try :
+        infile1 = sys.argv[sys.argv.index("-in1")+1]
+        infile2 = sys.argv[sys.argv.index("-in2")+1]
+        stat1 = sys.argv[sys.argv.index("-stat1")+1]
+        stat2 = sys.argv[sys.argv.index("-stat2")+1]
+        temp = sys.argv[sys.argv.index("-tmp")+1]
+        seuil = int(sys.argv[sys.argv.index("-tseuil")+1])
+        word_size = sys.argv[sys.argv.index("-ws")+1]
+        outfile = sys.argv[sys.argv.index("-out")+1]
+        core = sys.argv[sys.argv.index("-thread")+1]
+
+
+except :
+        sys.exit
+
+if temp[-1]!="/":
+        temp = temp + "/"
+
+
+if not os.path.exists(temp):
+        os.makedirs(temp)
+
+Statist = Parseur_stat(stat1, stat2)
+dico = Blastn(infile1, infile2, Statist, temp, core, word_size)
+Elimination(dico, temp, outfile)
+Nouv_stat(stat1, stat2, outfile, dico)
